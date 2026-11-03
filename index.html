@@ -1,0 +1,412 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Animal Management Program</title>
+<!-- AMP online: public login + loader (03/11/2026). Holds NO data: the app page and every record
+     are downloaded only after sign-in, from the private Supabase project. Built by
+     online/build_online.py from online/loader.html + online/cloud-core.js. -->
+<style>
+  :root { --brand:#00414B; --line:#c9d6d8; --bad:#b3261e; --bg:#f4f7f7; --panel:#fff; --muted:#5b6b6e; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--brand); font:15px/1.45 "Century Gothic", "Avenir Next", sans-serif; }
+  .wrap { max-width:380px; margin:0 auto; padding:56px 16px; }
+  h1 { font-size:22px; margin:0 0 2px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:24px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:20px; display:flex; flex-direction:column; gap:10px; }
+  input { width:100%; padding:10px 12px; border:1px solid var(--line); border-radius:8px; font:inherit; color:inherit; }
+  button { padding:10px 14px; border-radius:8px; border:1px solid var(--brand); background:var(--brand); color:#fff; font:inherit; font-weight:600; cursor:pointer; }
+  button.ghost { background:#fff; color:var(--brand); }
+  button:disabled { opacity:.6; cursor:default; }
+  .err { color:var(--bad); min-height:18px; font-size:13px; }
+  .status { font-size:14px; }
+  .bar { height:6px; background:#e3e9ea; border-radius:3px; overflow:hidden; }
+  .bar i { display:block; height:100%; width:0; background:var(--brand); transition:width .2s; }
+  .hidden { display:none !important; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Animal Management Program</h1>
+  <div class="sub">SMSRC · sign in with the account you were given</div>
+
+  <div class="card hidden" id="login">
+    <input id="email" type="email" placeholder="email" autocomplete="username">
+    <input id="pass" type="password" placeholder="password" autocomplete="current-password">
+    <div class="err" id="err"></div>
+    <button id="go">Sign in</button>
+  </div>
+
+  <div class="card hidden" id="busy">
+    <div class="status" id="msg">Opening…</div>
+    <div class="bar"><i id="prog"></i></div>
+    <div class="err" id="err2"></div>
+    <div id="acts" class="hidden" style="display:flex;gap:8px;flex-wrap:wrap"></div>
+  </div>
+</div>
+
+<script>
+/* ============================================================================================
+   AMP ONLINE — shared core (03/11/2026)
+
+   Used twice: inlined in the login/loader page (online/site/index.html) and built into the app
+   page (before ampcloud261103-module.js). Defines ONE global, window.AmpCloudCore, and nothing
+   else: the loader replaces its own document with the app page (document.open/write), and the
+   app's own top-level names must not collide with anything left behind.
+
+   No library: plain fetch against Supabase REST / Auth / Storage. The publishable key is safe to
+   embed (same as the maintenance app): every read and write is gated by the login + Row Level
+   Security (online/amp-cloud-261103.sql).
+
+   Data model: the app's whole `db` object becomes rows (collection, id, data):
+     - an array whose items all carry a unique id -> one row per item + an '_order' row (the ids)
+     - db.settings                                -> one row per settings key
+     - anything else                              -> one '_root' row per top-level key
+   ============================================================================================ */
+window.AmpCloudCore = (function () {
+  "use strict";
+  // Local tests only: on localhost a mock server can stand in for Supabase (tests/mock_supabase.py).
+  // The real address can never be redirected.
+  var URL_ = "https://fhbxwnkxoevkitexbjgs.supabase.co";
+  try {
+    if (/^(localhost|127\.0\.0\.1)$/.test(location.hostname) && localStorage.getItem("amp-cloud:mock"))
+      URL_ = localStorage.getItem("amp-cloud:mock");
+  } catch (e) {}
+  var KEY_ = "sb_publishable_u-vLtleobK8p3OJeMp13sQ_lUne_Jg2";
+  var AUTH_LS = "amp-cloud:auth";
+  var SEP = "\u0001";
+
+  // ---- canonical JSON: jsonb reorders object keys, so fingerprints sort them -------------
+  function canon(v) {
+    return JSON.stringify(v === undefined ? null : v, function (k, x) {
+      if (x && typeof x === "object" && !Array.isArray(x)) {
+        var o = {}, ks = Object.keys(x).sort();
+        for (var i = 0; i < ks.length; i++) o[ks[i]] = x[ks[i]];
+        return o;
+      }
+      return x;
+    });
+  }
+  function rk(c, id) { return c + SEP + id; }
+  function splitKey(k) { var i = k.indexOf(SEP); return [k.slice(0, i), k.slice(i + 1)]; }
+
+  function idArray(a) {
+    if (!Array.isArray(a)) return false;
+    var seen = {};
+    for (var i = 0; i < a.length; i++) {
+      var x = a[i];
+      if (!x || typeof x !== "object" || Array.isArray(x)) return false;
+      if (typeof x.id !== "string" && typeof x.id !== "number") return false;
+      var s = String(x.id);
+      if (seen[s]) return false;
+      seen[s] = 1;
+    }
+    return true;
+  }
+
+  // db -> Map(key -> plain JSON value). Values are deep copies (JSON round trip), so later
+  // edits of db never mutate a stored baseline.
+  function dbToRows(db) {
+    var m = new Map();
+    var src = JSON.parse(JSON.stringify(db || {}));
+    Object.keys(src).forEach(function (k) {
+      var v = src[k];
+      if (k === "settings" && v && typeof v === "object" && !Array.isArray(v)) {
+        Object.keys(v).forEach(function (sk) { if (v[sk] !== undefined) m.set(rk("settings", sk), v[sk]); });
+        m.set(rk("_root", "settings"), {});           // marks "settings is an object"
+      } else if (idArray(v)) {
+        m.set(rk("_order", k), v.map(function (x) { return String(x.id); }));
+        v.forEach(function (x) { m.set(rk(k, String(x.id)), x); });
+      } else {
+        m.set(rk("_root", k), v);
+      }
+    });
+    return m;
+  }
+
+  // Map(key -> value) -> db. Records missing from an _order row are appended (never dropped).
+  function rowsToDb(m) {
+    var db = {}, coll = {};
+    m.forEach(function (v, k) {
+      var p = splitKey(k), c = p[0], id = p[1];
+      if (c === "_root") { if (id === "settings") { db.settings = db.settings || {}; } else db[id] = v; }
+      else if (c === "_order") { /* below */ }
+      else if (c === "settings") { db.settings = db.settings || {}; db.settings[id] = v; }
+      else { (coll[c] = coll[c] || {})[id] = v; }
+    });
+    var orders = {};
+    m.forEach(function (v, k) { var p = splitKey(k); if (p[0] === "_order") orders[p[1]] = Array.isArray(v) ? v : []; });
+    Object.keys(orders).forEach(function (c) {
+      var recs = coll[c] || {}, used = {}, out = [];
+      orders[c].forEach(function (id) { if (recs[id] && !used[id]) { out.push(recs[id]); used[id] = 1; } });
+      Object.keys(recs).forEach(function (id) { if (!used[id]) out.push(recs[id]); });
+      db[c] = out;
+    });
+    Object.keys(coll).forEach(function (c) {
+      if (!orders[c]) db[c] = Object.keys(coll[c]).map(function (id) { return coll[c][id]; });
+    });
+    return db;
+  }
+
+  // Same rule as public.amp_can_edit() in the SQL.
+  function canEdit(member, c, id) {
+    if (!member) return false;
+    if (member.role === "admin") return true;
+    var e = member.edit || [];
+    return e.indexOf(c) >= 0 || e.indexOf(c + ":" + id) >= 0 ||
+      ((c === "_order" || c === "_root") && e.indexOf(id) >= 0);
+  }
+
+  // ---- auth ---------------------------------------------------------------------------------
+  function getAuth() { try { return JSON.parse(localStorage.getItem(AUTH_LS)) || null; } catch (e) { return null; } }
+  function setAuth(a) { try { if (a) localStorage.setItem(AUTH_LS, JSON.stringify(a)); else localStorage.removeItem(AUTH_LS); } catch (e) {} }
+  function keep(j) {
+    var a = { access_token: j.access_token, refresh_token: j.refresh_token,
+      expires_at: j.expires_at || (Math.floor(Date.now() / 1000) + (j.expires_in || 3600)),
+      user: { id: j.user && j.user.id, email: j.user && j.user.email } };
+    setAuth(a);
+    return a;
+  }
+  async function authCall(grant, body) {
+    var r = await fetch(URL_ + "/auth/v1/token?grant_type=" + grant, {
+      method: "POST", headers: { apikey: KEY_, "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    var j = await r.json().catch(function () { return {}; });
+    if (!r.ok) {
+      var err = new Error(j.error_description || j.msg || j.message || ("Sign-in failed (" + r.status + ")"));
+      err.status = r.status;
+      throw err;
+    }
+    return keep(j);
+  }
+  function signIn(email, password) { return authCall("password", { email: email, password: password }); }
+  var refreshing = null;
+  async function session(force) {
+    var a = getAuth();
+    if (!a || !a.refresh_token) return null;
+    if (!force && a.expires_at - 90 > Date.now() / 1000) return a;
+    if (!refreshing) refreshing = authCall("refresh_token", { refresh_token: a.refresh_token })
+      .catch(function (e) { if (e.status === 400 || e.status === 401) setAuth(null); throw e; })
+      .finally(function () { refreshing = null; });
+    return refreshing;
+  }
+  async function signOut() {
+    var a = getAuth();
+    setAuth(null);
+    try { if (a) await fetch(URL_ + "/auth/v1/logout", { method: "POST", headers: { apikey: KEY_, Authorization: "Bearer " + a.access_token } }); } catch (e) {}
+  }
+
+  // ---- REST ---------------------------------------------------------------------------------
+  async function req(path, opt) {
+    opt = opt || {};
+    for (var attempt = 0; attempt < 2; attempt++) {
+      var a = await session(attempt > 0);
+      if (!a) { var e0 = new Error("Not signed in"); e0.status = 401; throw e0; }
+      var h = Object.assign({ apikey: KEY_, Authorization: "Bearer " + a.access_token }, opt.headers || {});
+      var r = await fetch(URL_ + path, { method: opt.method || "GET", headers: h, body: opt.body });
+      if (r.status === 401 && attempt === 0) continue;
+      if (!r.ok) {
+        var j = await r.json().catch(function () { return {}; });
+        var e = new Error(j.message || j.error || ("HTTP " + r.status));
+        e.status = r.status; e.code = j.code;
+        throw e;
+      }
+      return r;
+    }
+  }
+  async function member() {
+    var a = await session();
+    if (!a) return null;
+    var r = await req("/rest/v1/amp_members?select=role,pages,edit&user_id=eq." + encodeURIComponent(a.user.id));
+    var rows = await r.json();
+    return rows[0] || null;
+  }
+  // Every row with seq > cursor, oldest first, in pages (the API returns at most 1000 at a time).
+  async function rowsSince(cursor) {
+    var out = [], cur = cursor || 0;
+    for (;;) {
+      var r = await req("/rest/v1/amp_rows?select=collection,id,data,deleted,seq&seq=gt." + cur + "&order=seq.asc&limit=1000");
+      var rows = await r.json();
+      out = out.concat(rows);
+      if (rows.length < 1000) break;
+      cur = rows[rows.length - 1].seq;
+    }
+    return out;
+  }
+  async function upsert(rows) {
+    await req("/rest/v1/amp_rows?on_conflict=collection,id", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Prefer: "resolution=merge-duplicates,return=minimal" },
+      body: JSON.stringify(rows) });
+  }
+  async function latestVersion() {
+    var r = await req("/rest/v1/amp_versions?select=path,bytes,note,uploaded_at&order=uploaded_at.desc&limit=1");
+    return (await r.json())[0] || null;
+  }
+  async function downloadBundle(path) {
+    var r = await req("/storage/v1/object/authenticated/amp-private/" + encodeURIComponent(path));
+    return await r.text();
+  }
+  async function uploadBundle(file, note) {
+    var d = new Date(), p = function (n) { return String(n).padStart(2, "0"); };
+    var path = "amp-" + String(d.getFullYear()).slice(2) + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds()) + ".html";
+    await req("/storage/v1/object/amp-private/" + path, { method: "POST", headers: { "Content-Type": "text/html" }, body: file });
+    await req("/rest/v1/amp_versions", { method: "POST", headers: { "Content-Type": "application/json", Prefer: "return=minimal" },
+      body: JSON.stringify({ path: path, bytes: file.size || null, note: note || null }) });
+    return path;
+  }
+
+  // ---- device storage (IndexedDB) -------------------------------------------------------------
+  function idb() {
+    return new Promise(function (res, rej) {
+      var o = indexedDB.open("amp-cloud", 1);
+      o.onupgradeneeded = function () { o.result.createObjectStore("kv"); };
+      o.onsuccess = function () { res(o.result); };
+      o.onerror = function () { rej(o.error); };
+    });
+  }
+  async function idbGet(k) {
+    var d = await idb();
+    return new Promise(function (res, rej) {
+      var t = d.transaction("kv", "readonly").objectStore("kv").get(k);
+      t.onsuccess = function () { res(t.result); }; t.onerror = function () { rej(t.error); };
+    });
+  }
+  async function idbSet(k, v) {
+    var d = await idb();
+    return new Promise(function (res, rej) {
+      var tx = d.transaction("kv", "readwrite");
+      tx.objectStore("kv").put(v, k);
+      tx.oncomplete = function () { res(); }; tx.onerror = function () { rej(tx.error); };
+    });
+  }
+
+  // Unsent changes: kept in localStorage (written synchronously on every save, so closing the
+  // tab right after an edit loses nothing). [[key, {data} | {deleted:true}], ...]
+  var OUTBOX_LS = "amp-cloud:outbox";
+  function getOutbox() { try { return new Map(JSON.parse(localStorage.getItem(OUTBOX_LS)) || []); } catch (e) { return new Map(); } }
+  function setOutbox(m) { try { if (m.size) localStorage.setItem(OUTBOX_LS, JSON.stringify(Array.from(m.entries()))); else localStorage.removeItem(OUTBOX_LS); } catch (e) {} }
+
+  // Merge server rows into a base Map; returns the keys that changed and the new cursor.
+  function applyRows(base, rows, cursor) {
+    var changed = [];
+    rows.forEach(function (r) {
+      var k = rk(r.collection, r.id);
+      if (r.deleted) { if (base.has(k)) { base.delete(k); changed.push(k); } }
+      else { base.set(k, r.data); changed.push(k); }
+      if (r.seq > cursor) cursor = r.seq;
+    });
+    return { changed: changed, cursor: cursor };
+  }
+
+  return {
+    URL: URL_, APP_KEY: "smsrc_feeding_v1", RUN_FLAG: "amp-cloud:run",
+    canon: canon, rk: rk, splitKey: splitKey, dbToRows: dbToRows, rowsToDb: rowsToDb, canEdit: canEdit,
+    signIn: signIn, signOut: signOut, session: session, getAuth: getAuth,
+    member: member, rowsSince: rowsSince, upsert: upsert,
+    latestVersion: latestVersion, downloadBundle: downloadBundle, uploadBundle: uploadBundle,
+    idbGet: idbGet, idbSet: idbSet, getOutbox: getOutbox, setOutbox: setOutbox, applyRows: applyRows,
+  };
+})();
+
+</script>
+<script>
+(function () {
+  "use strict";
+  var C = window.AmpCloudCore;
+  var $ = function (id) { return document.getElementById(id); };
+  function show(id) { ["login", "busy"].forEach(function (x) { $(x).classList.toggle("hidden", x !== id); }); }
+  function msg(t, pct) { show("busy"); $("msg").textContent = t; if (pct != null) $("prog").style.width = pct + "%"; }
+  function fail(t, actions) {
+    show("busy"); $("err2").textContent = t;
+    var a = $("acts"); a.innerHTML = ""; a.classList.toggle("hidden", !actions);
+    (actions || []).forEach(function (x) { var b = document.createElement("button"); b.textContent = x[0]; if (x[2]) b.className = "ghost"; b.onclick = x[1]; a.appendChild(b); });
+  }
+  function act(label, fn, ghost) { return [label, fn, ghost]; }
+  var signOutAct = act("Sign out", function () { C.signOut().then(function () { location.reload(); }); }, true);
+
+  function loginForm() {
+    show("login");
+    $("email").focus();
+    var submit = async function () {
+      $("err").textContent = ""; $("go").disabled = true; $("go").textContent = "Signing in…";
+      try { await C.signIn($("email").value.trim(), $("pass").value); $("pass").value = ""; open(); }
+      catch (e) { $("err").textContent = e.message || "Sign-in failed."; $("go").disabled = false; $("go").textContent = "Sign in"; }
+    };
+    $("go").onclick = submit;
+    $("pass").onkeydown = function (e) { if (e.key === "Enter") submit(); };
+  }
+
+  async function open() {
+    msg("Checking your access…", 5);
+    var s = null;
+    try { s = await C.session(); } catch (e) { s = C.getAuth(); } // offline: keep the stored session
+    if (!s) return loginForm();
+
+    var member = null, online = true;
+    try { member = await C.member(); if (member) await C.idbSet("member", member); }
+    catch (e) {
+      if (e.status === 401) { await C.signOut(); return loginForm(); }
+      online = false; member = await C.idbGet("member").catch(function () { return null; });
+    }
+    if (!member) return fail(online ? "This login has no access to the Animal Management Program." : "No connection, and this device has never opened the AMP.", [signOutAct]);
+
+    // 1. the app page (private bucket), downloaded only when a new version exists
+    msg("Checking the app version…", 10);
+    var cached = await C.idbGet("bundle").catch(function () { return null; }), ver = null;
+    if (online) { try { ver = await C.latestVersion(); } catch (e) { online = false; } }
+    if (!ver && online) {
+      if (member.role === "admin") return firstUpload();
+      return fail("The AMP has not been published yet.", [signOutAct]);
+    }
+    var html;
+    if (ver && (!cached || cached.path !== ver.path)) {
+      msg("Downloading the app (" + (ver.bytes ? (ver.bytes / 1048576).toFixed(1) + " MB" : "first time") + ")…", 20);
+      try { html = await C.downloadBundle(ver.path); await C.idbSet("bundle", { path: ver.path, html: html }); }
+      catch (e) { if (!cached) return fail("Download failed: " + (e.message || e), [act("Try again", function () { location.reload(); })]); html = cached.html; }
+    } else if (cached) html = cached.html;
+    else return fail("No connection, and this device has never opened the AMP.", [act("Try again", function () { location.reload(); })]);
+
+    // 2. the data: what this device last agreed with the server + what changed since
+    msg("Loading the data…", 70);
+    var b = await C.idbGet("base").catch(function () { return null; }) || { cursor: 0, rows: [] };
+    var base = new Map(b.rows || []), cursor = b.cursor || 0;
+    if (online) {
+      try { var r = C.applyRows(base, await C.rowsSince(cursor), cursor); cursor = r.cursor; await C.idbSet("base", { cursor: cursor, rows: Array.from(base.entries()) }); }
+      catch (e) { online = false; }
+    }
+    // unsent changes from the last session go on top (they are sent as soon as the app starts)
+    var view = new Map(base);
+    C.getOutbox().forEach(function (e, k) { if (e.deleted) view.delete(k); else view.set(k, e.data); });
+    try {
+      if (view.size) localStorage.setItem(C.APP_KEY, JSON.stringify(C.rowsToDb(view)));
+      else if (member.role !== "admin") localStorage.removeItem(C.APP_KEY);
+      sessionStorage.setItem(C.RUN_FLAG, "1");
+    } catch (e) { return fail("This browser refused to store the data (" + (e.message || e) + "). Try another browser or turn off private mode."); }
+
+    // 3. hand over: the app page replaces this one, same address
+    msg("Opening…", 100);
+    setTimeout(function () { document.open(); document.write(html); document.close(); }, 30);
+  }
+
+  // Admin, nothing published yet: pick the built SMSRC Animal Management Program.html
+  function firstUpload() {
+    fail("No app version has been uploaded yet. Choose the built file \"SMSRC Animal Management Program.html\".", [
+      act("Choose file…", function () {
+        var inp = document.createElement("input"); inp.type = "file"; inp.accept = ".html,text/html";
+        inp.onchange = async function () {
+          var f = inp.files && inp.files[0]; if (!f) return;
+          $("err2").textContent = ""; msg("Uploading " + f.name + " (" + (f.size / 1048576).toFixed(1) + " MB)…", 30);
+          try { await C.uploadBundle(f, f.name); location.reload(); }
+          catch (e) { fail("Upload failed: " + (e.message || e), [act("Try again", firstUpload), signOutAct]); }
+        };
+        inp.click();
+      }), signOutAct]);
+  }
+
+  open().catch(function (e) { fail("Could not open: " + (e.message || e), [act("Reload", function () { location.reload(); }), signOutAct]); });
+})();
+</script>
+</body>
+</html>
