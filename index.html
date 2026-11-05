@@ -5,6 +5,9 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
 <title>Animal Management Program</title>
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/favicon.png">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png">
 <!-- AMP online: public login + loader (03/11/2026). Holds NO data: the app page and every record
      are downloaded only after sign-in, from the private Supabase project. Built by
      online/build_online.py from online/loader.html + online/cloud-core.js. -->
@@ -387,6 +390,9 @@ window.AmpCloudCore = (function () {
 
     // 3. hand over: the app page replaces this one, same address
     msg("Opening…", 100);
+    // the app's own tab icon is a data: image, which the browser did not show here (05/11/2026): use the site's files
+    html = html.replace(/<link rel="icon"[^>]*>/, '<link rel="icon" href="/favicon.ico" sizes="any"><link rel="icon" type="image/png" href="/favicon.png">')
+               .replace(/<link rel="apple-touch-icon"[^>]*>/, '<link rel="apple-touch-icon" href="/apple-touch-icon.png">');
     setTimeout(function () { document.open(); document.write(html); document.close(); }, 30);
   }
 
